@@ -1,0 +1,25 @@
+Web Content Extraction Benchmark - Extended Version
+
+This project is based on the original Web Content Extraction Benchmark:
+  Copyright 2023 Janek Bevendorff
+  Repository: https://github.com/chatnoir-eu/web-content-extraction-benchmark
+  License: Apache License 2.0
+
+Original Paper:
+  "An Empirical Comparison of Web Content Extraction Algorithms"
+  Bevendorff et al., SIGIR 2023
+  DOI: 10.1145/3539618.3591920
+
+Modifications and Extensions:
+  - Added BLEU metric evaluation
+  - Integrated Crawl4AI extraction model
+  - Extended datasets: Canola and Newspaper3k
+
+This project uses Crawl4AI library:
+  Repository: https://github.com/unclecode/crawl4ai
+  License: Apache License 2.0
+  Used for web content extraction via WebScrapingStrategy and DefaultMarkdownGenerator
+
+This project is licensed under the Apache License, Version 2.0.
+See LICENSE file for details.
+

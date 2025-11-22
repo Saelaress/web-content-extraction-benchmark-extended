@@ -1,0 +1,517 @@
+# Copyright 2023 Janek Bevendorff
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from abc import ABC, abstractmethod
+import errno
+import glob
+import gzip
+import hashlib
+from itertools import chain
+import json
+import os
+import re
+from typing import Any, Dict, Iterable, Optional, Tuple
+
+from resiliparse.parse import bytes_to_str, detect_encoding
+from resiliparse.parse.html import HTMLTree, NodeType
+
+from extraction_benchmark.globals import DATASETS
+from extraction_benchmark.paths import *
+
+
+class DatasetReader(ABC):
+    """Abstract dataset reader class."""
+
+    def __init__(self, ground_truth):
+        """
+        Initialize dataset reader.
+
+        :param ground_truth: whether the reader should return the raw HTML data or the ground truth.
+        """
+        self.is_truth = ground_truth
+        self._iter = iter(self.read())
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self._iter)
+
+    def __len__(self):
+        return self.dataset_size()
+
+    @abstractmethod
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        """
+        Return an iterable over the items in the dataset.
+
+        Returned items should be tuples with the case / page ID and the case / page data as a dict.
+        The dicts should contain at least an ``"html"`` or ``"plaintext"`` key, depending on whether
+        the iterated dataset is a raw HTML or a ground truth page.
+        """
+        pass
+
+    @abstractmethod
+    def dataset_size(self) -> Optional[int]:
+        """
+        Return size of dataset or ``None`` if size is unknown.
+
+        :return: size of dataset
+        """
+        pass
+
+    @staticmethod
+    def _hash(data: bytes):
+        """
+        Return SHA-256 hash of input bytes, which can be used as a an ID.
+
+        :param data: input bytes
+        :return: hash of bytes as hex string
+        """
+        m = hashlib.sha256()
+        m.update(data)
+        return m.hexdigest()
+
+    @classmethod
+    def _file_hash(cls, file: str):
+        """
+        Return SHA-256 hash of a file that can be used as a page ID.
+
+        :param file: input file name
+        :return: hash of the file as hex string
+        """
+        with open(file, 'rb') as f:
+            return cls._hash(f.read())
+
+    def _build_dict(self, source_dataset, source_case, content, **kwargs) -> Dict[str, Any]:
+        """
+        Helper method for creating a dict to return in :meth:`read`.
+
+        :param source_dataset: source dataset name
+        :param source_case: source case / file name
+        :param content: HTML or plaintext content
+        :param kwargs: other key / value pairs to include in the dict
+        :return: dict with requested data
+        """
+        d = {
+            ('plaintext' if self.is_truth else 'html'): content,
+            **{k: v for k, v in kwargs.items() if v},
+            'source': [source_dataset, source_case] if source_case else [source_dataset]
+        }
+        return d
+
+    @staticmethod
+    def _read_file(path, fixed_encoding=None):
+        """
+        Helper method for reading a file, detecting its encoding and returning the contents as UTF-8 string.
+        If the input file is GZip-compressed, it will be decompressed automatically.
+
+        :param path: file path
+        :param fixed_encoding: use this fixed encoding instead of trying to detect if from the file
+        :return: UTF-8 string of file contents
+        """
+        with open(path, 'rb') as f:
+            file_bytes = f.read()
+            if path.endswith('.gz'):
+                file_bytes = gzip.decompress(file_bytes)
+            if fixed_encoding:
+                enc = fixed_encoding
+            else:
+                enc = detect_encoding(file_bytes, max_len=100000, html5_compatible=False) or 'utf-8'
+            return bytes_to_str(file_bytes, encoding=enc, fallback_encodings=['utf-8', 'cp1252'])
+
+
+class CleanEvalReader(DatasetReader):
+    def __init__(self, ground_truth):
+        super().__init__(ground_truth)
+
+        self.dataset_name = 'cleaneval'
+        self.dataset_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'orig')
+        self.dataset_path_truth = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'clean')
+
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        read_path = self.dataset_path_truth if self.is_truth else self.dataset_path
+
+        text_tag_re = re.compile(r'(?:^<text [^>]+>\s*|\s*</text>$)', flags=re.MULTILINE)
+
+        for file in os.listdir(read_path):
+            abs_path = os.path.join(read_path, file)
+            content = self._read_file(abs_path)
+            url = None
+            if self.is_truth:
+                url = re.search(r'^\s*URL: (https?://.+)', content)
+                if url:
+                    url = url.group(1)
+                content = HTMLTree.parse(content).body.text
+                content = re.sub(r'\n +', '\n', content)
+                content = re.sub(r'^\s*URL:[^\n]+\s*', '', content)    # Strip URL line
+
+            if self.is_truth:
+                abs_path = os.path.join(self.dataset_path, os.path.splitext(file)[0] + '.html')
+            else:
+                content = text_tag_re.sub('', content)
+            source = os.path.splitext(file)[0]
+            yield self._file_hash(abs_path), self._build_dict(self.dataset_name, source, content, url=url)
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, self.dataset_name, 'clean', '*.txt')))
+
+
+class CleanPortalEvalReader(CleanEvalReader):
+    def __init__(self, ground_truth):
+        super().__init__(ground_truth)
+        self.dataset_name = 'cleanportaleval'
+        self.dataset_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'input')
+        self.dataset_path_truth = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'ConvertedGoldStandard')
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, self.dataset_name, 'ConvertedGoldStandard', '*.txt')))
+    
+class Newspaper3kReader(DatasetReader):
+    def __init__(self, ground_truth):
+        super().__init__(ground_truth)
+        self.dataset_name = 'newspaper3k'
+        self.dataset_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'html')
+        self.dataset_path_truth = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'text')
+
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        read_path = self.dataset_path_truth if self.is_truth else self.dataset_path
+        
+        # Создаем маппинг между HTML и текстовыми файлами
+        html_files = set(os.path.splitext(f)[0] for f in os.listdir(self.dataset_path) if f.endswith('.html'))
+        text_files = set(os.path.splitext(f)[0] for f in os.listdir(self.dataset_path_truth) if f.endswith('.txt'))
+        
+        # Специальные маппинги для файлов с разными именами
+        name_mapping = {
+            'arabic': 'arabic_article',
+            'chinese': 'chinese_article', 
+            'japanese': 'japanese_article',
+            'japanese2': 'japanese_article2',
+            'cnn': 'cnn_article',
+            'cnn_summary': 'cnn_main_site'
+        }
+        
+        for file in os.listdir(read_path):
+            if not file.endswith('.txt' if self.is_truth else '.html'):
+                continue
+                
+            abs_path = os.path.join(read_path, file)
+            content = self._read_file(abs_path)
+            source = os.path.splitext(file)[0]
+            
+            if self.is_truth:
+                # Для текстовых файлов ищем соответствующий HTML
+                html_name = name_mapping.get(source, source)
+                html_file = os.path.join(self.dataset_path, html_name + '.html')
+                
+                # Проверяем существование HTML файла
+                if not os.path.exists(html_file):
+                    continue
+                    
+                hash_file = html_file
+            else:
+                # Для HTML файлов проверяем наличие соответствующего текста
+                text_name = None
+                for txt_name, html_name in name_mapping.items():
+                    if html_name == source:
+                        text_name = txt_name
+                        break
+                if text_name is None:
+                    text_name = source
+                    
+                text_file = os.path.join(self.dataset_path_truth, text_name + '.txt')
+                if not os.path.exists(text_file):
+                    continue
+                    
+                hash_file = abs_path
+            
+            yield self._file_hash(hash_file), self._build_dict(
+                self.dataset_name, 
+                source, 
+                content,
+                url=None
+            )
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, self.dataset_name, 'text', '*.txt')))
+
+
+class DragnetReader(DatasetReader):
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'dragnet', 'HTML')
+        dataset_path_truth = os.path.join(DATASET_RAW_PATH, 'dragnet', 'corrected', 'Corrected')
+        read_path = dataset_path_truth if self.is_truth else dataset_path
+
+        for file in os.listdir(read_path):
+            abs_path = os.path.join(read_path, file)
+            content = self._read_file(abs_path)
+            if self.is_truth:
+                file = os.path.splitext(os.path.splitext(file)[0])[0]
+                abs_path = os.path.join(dataset_path, file)
+            source = os.path.splitext(file)[0]
+            yield self._file_hash(abs_path), self._build_dict('dragnet', source, content)
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, 'dragnet', 'corrected', 'Corrected', '*.txt')))
+
+
+class CETDReader(DatasetReader):
+    def __init__(self, ground_truth):
+        super().__init__(ground_truth)
+        self.verticals = ['arstechnica', 'BBC', 'Chaos', 'nytimes', 'wiki', 'YAHOO!']
+
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'cetd')
+        for vertical in self.verticals:
+            sub_path = os.path.join(dataset_path, vertical, 'gold' if self.is_truth else 'original')
+            for file in os.listdir(sub_path):
+                abs_path = os.path.join(sub_path, file)
+                content = self._read_file(abs_path)
+                if self.is_truth:
+                    abs_path = os.path.join(dataset_path, vertical, 'original', os.path.splitext(file)[0] + '.htm')
+                source = vertical + '_' + os.path.splitext(file)[0]
+                yield self._file_hash(abs_path), self._build_dict('cetd', source, content)
+
+    def dataset_size(self) -> Optional[int]:
+        return sum([len(glob.glob(os.path.join(DATASET_RAW_PATH, 'cetd', v, 'gold', '*.txt')))
+                    for v in self.verticals])
+
+
+class ReadabilityReader(DatasetReader):
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'readability', 'test-pages')
+        for case_dir in os.listdir(dataset_path):
+            sub_path = 'expected.html' if self.is_truth else 'source.html'
+            abs_path = os.path.join(dataset_path, os.path.join(case_dir, sub_path))
+            content = self._read_file(abs_path)
+            if self.is_truth:
+                content = HTMLTree.parse(content).body.text
+                abs_path = os.path.join(dataset_path, os.path.join(case_dir, 'source.html'))
+            yield self._file_hash(abs_path), self._build_dict('readability', case_dir, content)
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, 'readability', 'test-pages', '*', 'expected.html')))
+
+
+class ScrapingHubReader(DatasetReader):
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'scrapinghub')
+
+        if self.is_truth:
+            truth_json = json.load(open(os.path.join(dataset_path, 'ground-truth.json'), 'r'))
+            for k, v in truth_json.items():
+                # Instead of using provided hash, re-calculate hash from original HTML file for consistency
+                with gzip.GzipFile(os.path.join(dataset_path, 'html', f'{k}.html.gz'), 'r') as f:
+                    file_hash = self._hash(f.read())
+                yield file_hash, self._build_dict('scrapinghub', k, v['articleBody'], url=v['url'])
+            return
+
+        dataset_path = os.path.join(dataset_path, 'html')
+        for file in os.listdir(dataset_path):
+            abs_path = os.path.join(dataset_path, file)
+            hash_id = os.path.splitext(os.path.splitext(file)[0])[0]
+            with gzip.GzipFile(abs_path, 'r') as f:
+                file_hash = self._hash(f.read())
+            yield file_hash, self._build_dict('scrapinghub', hash_id, self._read_file(abs_path))
+
+    def dataset_size(self) -> Optional[int]:
+        return len(json.load(open(os.path.join(DATASET_RAW_PATH, 'scrapinghub', 'ground-truth.json'), 'r')))
+
+
+class L3SGN1Reader(DatasetReader):
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'l3s-gn1', 'original')
+        dataset_path_truth = os.path.join(DATASET_RAW_PATH, 'l3s-gn1', 'annotated')
+        read_path = dataset_path_truth if self.is_truth else dataset_path
+
+        for file in os.listdir(read_path):
+            abs_path = os.path.join(read_path, file)
+            content = self._read_file(abs_path)
+            if self.is_truth:
+                abs_path = os.path.join(dataset_path, file)
+                content = self._extract_with_css_selector(content, '.x-nc-sel1, .x-nc-sel2, .x-nc-sel3')
+            source = os.path.splitext(file)[0]
+            yield self._file_hash(abs_path), self._build_dict('l3s-gn1', source, content)
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, 'l3s-gn1', 'annotated', '*.html')))
+
+    @staticmethod
+    def _extract_with_css_selector(html, selector):
+        tree = HTMLTree.parse(html)
+        elements = tree.body.query_selector_all(selector)
+        content = ''
+        for e in elements:
+            if len(e.child_nodes) != 1 or e.first_child.type != NodeType.TEXT:
+                # Only count leaf nodes to avoid adding an element multiple times
+                continue
+            if e.parent.tag in ['address', 'article', 'aside', 'blockquote', 'canvas', 'dd', 'div', 'dl', 'dt',
+                                'fieldset',
+                                'figcaption', 'figure', 'footer', 'form', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'header',
+                                'hr', 'li', 'main', 'nav', 'noscript', 'ol', 'p', 'pre', 'section', 'table', 'tfoot',
+                                'ul', 'video']:
+                content += '\n'
+            content += e.text.strip() + ' '
+        return content.strip()
+
+
+class GoogleTrends2017Reader(L3SGN1Reader):
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        dataset_path = os.path.join(DATASET_RAW_PATH, 'google-trends-2017', 'raw_html')
+        dataset_path_truth = os.path.join(DATASET_RAW_PATH, 'google-trends-2017', 'prepared_html')
+        read_path = dataset_path_truth if self.is_truth else dataset_path
+
+        for file in os.listdir(read_path):
+            abs_path = os.path.join(read_path, file)
+            content = self._read_file(abs_path)
+            if self.is_truth:
+                abs_path = os.path.join(dataset_path, file)
+                content = self._extract_with_css_selector(content, '[__boilernet_label="1"]')
+            source = os.path.splitext(file)[0]
+            yield self._file_hash(abs_path), self._build_dict('google-trends-2017', source, content)
+
+    def dataset_size(self) -> Optional[int]:
+        return len(glob.glob(os.path.join(DATASET_RAW_PATH, 'google-trends-2017', 'prepared_html', '*.html')))
+
+
+class CanolaReader(DatasetReader):
+    def __init__(self, ground_truth):
+        super().__init__(ground_truth)
+        self.dataset_name = 'canola'
+        self.dataset_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'html')
+        self.urls_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'annotations', 'urls')
+        self.plan_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'annotations', 'plan.canola')
+
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        # Загружаем маппинг ID к URL
+        urls_map = {}
+        with open(self.urls_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    parts = line.split(' ', 1)
+                    if len(parts) == 2:
+                        urls_map[parts[0]] = parts[1]
+        
+        # Загружаем список ID для финального корпуса
+        with open(self.plan_path, 'r', encoding='utf-8') as f:
+            valid_ids = set(line.strip() for line in f if line.strip())
+        
+        for file_id in valid_ids:
+            # Используем файлы без расширения .org (это финальные версии с HTML обертками)
+            html_file = os.path.join(self.dataset_path, file_id)
+            
+            if not os.path.exists(html_file):
+                continue
+            
+            if self.is_truth:
+                # Для ground truth извлекаем текст из элементов с krdwrd-tag-3 (основной контент)
+                content = self._read_file(html_file)
+                content = self._extract_ground_truth(content)
+            else:
+                # Для HTML читаем файл как есть
+                content = self._read_file(html_file)
+            
+            url = urls_map.get(file_id, '')
+            yield self._file_hash(html_file), self._build_dict(
+                self.dataset_name, 
+                file_id, 
+                content,
+                url=url
+            )
+
+    def _extract_ground_truth(self, html_content):
+        """Извлекает ground truth из HTML с аннотациями Canola."""
+        try:
+            tree = HTMLTree.parse(html_content)
+            # Ищем элементы с классом krdwrd-tag-3 (основной контент согласно аннотации)
+            main_content_elements = tree.body.query_selector_all('.krdwrd-tag-3')
+            
+            content_parts = []
+            for element in main_content_elements:
+                text = element.text.strip()
+                if text:
+                    content_parts.append(text)
+            
+            return '\n'.join(content_parts)
+        except Exception:
+            # Если парсинг не удался, возвращаем пустую строку
+            return ''
+
+    def dataset_size(self) -> Optional[int]:
+        try:
+            with open(self.plan_path, 'r', encoding='utf-8') as f:
+                return sum(1 for line in f if line.strip())
+        except FileNotFoundError:
+            return 0
+
+
+class CombinedDatasetReader(DatasetReader):
+    def __init__(self, ground_truth, read_subsets=None):
+        super().__init__(ground_truth)
+        self.subsets = sorted(read_subsets) if read_subsets else sorted(DATASETS)
+
+    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
+        if self.is_truth:
+            for ds in self.subsets:
+                with open(os.path.join(DATASET_COMBINED_TRUTH_PATH, f'{ds}.jsonl')) as f:
+                    for line in f:
+                        j = json.loads(line)
+                        yield j['page_id'], {k: v for k, v in j.items() if k != 'page_id'}
+            return
+
+        for ds in self.subsets:
+            for filename in glob.glob(os.path.join(DATASET_COMBINED_HTML_PATH, ds, '*.html')):
+                page_id = os.path.splitext(os.path.basename(filename))[0]
+                yield page_id, self._build_dict(ds, page_id, self._read_file(filename, 'utf-8'))
+
+    def dataset_size(self) -> Optional[int]:
+        # Count lines in all truth files
+        return sum(chain(*((1 for _ in open(
+            os.path.join(DATASET_COMBINED_TRUTH_PATH, f'{ds}.jsonl'), 'r')) for ds in self.subsets)))
+
+
+def read_raw_dataset(dataset, ground_truth):
+    """Read raw (unprocessed datasets)."""
+    match dataset:
+        case 'cetd':
+            return CETDReader(ground_truth)
+        case 'cleaneval':
+            return CleanEvalReader(ground_truth)
+        case 'cleanportaleval':
+            return CleanPortalEvalReader(ground_truth)
+        case 'newspaper3k':
+            return Newspaper3kReader(ground_truth)
+        case 'dragnet':
+            return DragnetReader(ground_truth)
+        case 'google-trends-2017':
+            return GoogleTrends2017Reader(ground_truth)
+        case 'l3s-gn1':
+            return L3SGN1Reader(ground_truth)
+        case 'readability':
+            return ReadabilityReader(ground_truth)
+        case 'scrapinghub':
+            return ScrapingHubReader(ground_truth)
+        case 'canola':
+            return CanolaReader(ground_truth)
+        case _:
+            raise ValueError(f'Invalid dataset: {dataset}')
+
+
+def read_datasets(datasets: Iterable[str], ground_truth):
+    """Read (subsets of) processed and combined datasets."""
+    if not os.path.isdir(DATASET_COMBINED_PATH):
+        raise FileNotFoundError(errno.ENOENT, 'Combined dataset folder not found', DATASET_COMBINED_PATH)
+
+    return CombinedDatasetReader(ground_truth, datasets)
