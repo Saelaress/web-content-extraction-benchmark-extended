@@ -50,6 +50,4 @@ venv.bak/
 datasets/combined/
 datasets/raw/
 
-outputs/metrics-computed/
-outputs/model-outputs/
 outputs/html-features/
