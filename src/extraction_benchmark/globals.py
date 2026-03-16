@@ -25,14 +25,28 @@ _DATASET_FRIENDLY_NAME_MAP = {
     'l3s-gn1': 'L3S-GN1',
     'readability': 'Readability',
     'scrapinghub': 'Scrapinghub',
-    'canola': 'Canola'
+    'canola': 'Canola',
+    'data-ml': 'Data-ML',
 }
 
+raw_datasets = []
 if os.path.isdir(DATASET_RAW_PATH):
-    DATASETS = {k: _DATASET_FRIENDLY_NAME_MAP.get(k, k) for k in os.listdir(DATASET_RAW_PATH)
-                if os.path.isdir(os.path.join(DATASET_RAW_PATH, k))}
-else:
-    DATASETS = {}
+    raw_datasets = [
+        k for k in os.listdir(DATASET_RAW_PATH)
+        if os.path.isdir(os.path.join(DATASET_RAW_PATH, k))
+    ]
+
+combined_datasets = []
+if os.path.isdir(DATASET_COMBINED_TRUTH_PATH):
+    combined_datasets = [
+        os.path.splitext(f)[0]
+        for f in os.listdir(DATASET_COMBINED_TRUTH_PATH)
+        if f.endswith('.jsonl')
+    ]
+
+_ALL_DATASET_KEYS = sorted(set(raw_datasets) | set(combined_datasets))
+
+DATASETS = {k: _DATASET_FRIENDLY_NAME_MAP.get(k, k) for k in _ALL_DATASET_KEYS}
 
 _MODEL_FRIENDLY_NAME_MAP = dict(
     ensemble_best='(Best only)',

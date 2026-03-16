@@ -147,9 +147,9 @@ def _extract_with_model(model, dataset, skip_existing=False, verbose=False):
             extracted[file_hash] = out_data
             
             # Сохраняем промежуточные результаты каждые 10 файлов
-            if i % 10 == 0:
-                logger.info(f"[{model_name}] Сохраняю промежуточные результаты... ({i}/{len(files_to_process)})")
-                _dict_to_jsonl(out_path, extracted)
+            # if i % 10 == 0:
+            logger.info(f"[{model_name}] Сохраняю промежуточные результаты... ({i}/{len(files_to_process)})")
+            _dict_to_jsonl(out_path, extracted)
 
     if not extracted:
         return
