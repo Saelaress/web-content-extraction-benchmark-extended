@@ -222,13 +222,34 @@ def prepare_for_sklearn(
     return X, feature_names, encoders or {}
 
 
+# Булевые колонки: при обучении приходят из CSV как 0/1; при инференсе — True/False.
+# CatBoost может обрабатывать их по-разному; приводим к 0/1 как при обучении.
+_BOOL_COLUMNS = {
+    "node__tag_is_a", "node__tag_is_div", "node__tag_is_p", "node__tag_is_heading",
+    "node__tag_is_article", "node__tag_is_nav", "node__tag_is_footer", "node__tag_is_header",
+    "node__has_parent_article", "node__is_excluded_tag",
+    "text__has_visible_text", "text__is_whitespace_only", "text__has_only_links",
+    "text__ends_with_punctuation", "meta__has_email", "meta__has_microdata_article",
+}
+
+
 def prepare_for_catboost(flat_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[str]]:
     """
     Готовит данные для CatBoost: список плоских dict и имена колонок.
-    Из list[dict] строится pandas.DataFrame; cat_features = CATEGORICAL_COLUMNS.
+    Булевые значения приводятся к 0/1, как при обучении (из CSV).
     """
     if not flat_rows:
         return [], [_flat_key_to_feature_name(p) for p in FEATURE_SPEC]
     feature_names = [_flat_key_to_feature_name(p) for p in FEATURE_SPEC]
-    return flat_rows, feature_names
+    # Приводим bool к int 0/1, чтобы совпасть с форматом при обучении (CSV)
+    normalized: list[dict[str, Any]] = []
+    for row in flat_rows:
+        out: dict[str, Any] = {}
+        for k, v in row.items():
+            if k in _BOOL_COLUMNS and isinstance(v, bool):
+                out[k] = 1 if v else 0
+            else:
+                out[k] = v
+        normalized.append(out)
+    return normalized, feature_names
 

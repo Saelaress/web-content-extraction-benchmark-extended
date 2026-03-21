@@ -16,7 +16,6 @@ from typing import Any
 import numpy as np
 
 from extraction_benchmark.paths import THIRD_PARTY_PATH
-from .text_extraction import extract_text_from_labeled_nodes_full
 from .vectorize import (
     data_ml_to_flat_row,
     prepare_for_catboost,
@@ -85,6 +84,19 @@ def _html_to_data_ml_rows(html: str) -> tuple[list[dict[str, Any]], list[_Elemen
 
 
 @lru_cache(maxsize=1)
+def _load_label_encoders():
+    import joblib
+
+    path = MODELS_ROOT / "label_encoders.joblib"
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Файл {path} не найден. Скопируйте label_encoders.joblib из папки "
+            "6 обучение модели/output/models/ в third-party/data-ml-models/"
+        )
+    return joblib.load(path)
+
+
+@lru_cache(maxsize=1)
 def _load_logreg():
     import joblib
 
@@ -114,22 +126,29 @@ def _predict_labels_logreg(flat_rows: list[dict[str, Any]]) -> list[int]:
     if not flat_rows:
         return []
     scaler, model = _load_logreg()
-    X, _, _ = prepare_for_sklearn(flat_rows)
+    label_encoders = _load_label_encoders()
+    X, _, _ = prepare_for_sklearn(flat_rows, label_encoders=label_encoders)
     X_scaled = scaler.transform(X.astype(np.float64))
     y_pred = model.predict(X_scaled)
     return y_pred.astype(int).tolist()
 
 
 def _predict_labels_rf(flat_rows: list[dict[str, Any]]) -> list[int]:
+    import sys
     if not flat_rows:
         return []
     model = _load_rf()
-    X, _, _ = prepare_for_sklearn(flat_rows)
+    label_encoders = _load_label_encoders()
+    X, _, _ = prepare_for_sklearn(flat_rows, label_encoders=label_encoders)
+    print(f"[RF debug] X.shape={X.shape}, X.dtype={X.dtype}", file=sys.stderr)
     y_pred = model.predict(X.astype(np.float64))
+    n_main = int(np.sum(y_pred == 1))
+    print(f"[RF debug] предсказано: main={n_main}, template={len(y_pred)-n_main}", file=sys.stderr)
     return y_pred.astype(int).tolist()
 
 
 def _predict_labels_catboost(flat_rows: list[dict[str, Any]]) -> list[int]:
+    import sys
     if not flat_rows:
         return []
     import pandas as pd
@@ -137,9 +156,12 @@ def _predict_labels_catboost(flat_rows: list[dict[str, Any]]) -> list[int]:
     model = _load_catboost()
     rows_for_cb, feature_names = prepare_for_catboost(flat_rows)
     df = pd.DataFrame(rows_for_cb, columns=feature_names)
+    print(f"[CB debug] df.shape={df.shape}, dtypes(cat): {df[['node__tag_name']].dtypes.to_dict()}", file=sys.stderr)
     y_pred = model.predict(df)
     if hasattr(y_pred, "ravel"):
         y_pred = y_pred.ravel()
+    n_main = int(np.sum(y_pred == 1))
+    print(f"[CB debug] предсказано: main={n_main}, template={len(y_pred)-n_main}", file=sys.stderr)
     return np.array(y_pred, dtype=int).tolist()
 
 
@@ -165,10 +187,11 @@ def extract_with_model(html: str, page_id: str, model_name: str) -> str:
 
     model_name: 'rf' | 'lr' | 'catboost'
     """
-    del page_id
-
+    import sys
+    
     rows_data, elements = _html_to_data_ml_rows(html)
     if not rows_data or not elements:
+        print(f"[{model_name}] {page_id}: нет узлов с data-ml", file=sys.stderr)
         return ""
 
     flat_rows = [data_ml_to_flat_row(d) for d in rows_data]
@@ -183,16 +206,27 @@ def extract_with_model(html: str, page_id: str, model_name: str) -> str:
         raise ValueError(f"Неизвестная модель: {model_name}")
 
     labels_for_nodes = _build_labels_for_elements(elements, node_labels)
+    
+    # Отладка: проверяем распределение меток
+    n_main = sum(1 for l in labels_for_nodes if l == 1)
+    n_template = len(labels_for_nodes) - n_main
+    print(f"[{model_name}] {page_id[:16]}: узлов={len(labels_for_nodes)}, main={n_main}, template={n_template}", file=sys.stderr)
 
-    # Собираем текст по меткам узлов (как для ground truth).
+    if n_main == 0:
+        print(f"[{model_name}] {page_id[:16]}: все узлы = template, текст будет пустым", file=sys.stderr)
+        return ""
+
+    # Извлекаем текст через метод текстовых листьев (как в evaluate.py).
     from tempfile import NamedTemporaryFile
+    from .text_extraction import get_text_leaves_from_html, combine_predicted_text
 
     with NamedTemporaryFile(suffix=".html", delete=True) as tmp:
         tmp.write(html.encode("utf-8", errors="replace"))
         tmp.flush()
         tmp_path = Path(tmp.name)
-        text = extract_text_from_labeled_nodes_full(
-            tmp_path, labels_for_nodes, encoding="utf-8", block_sep="\n"
-        )
+        leaves = get_text_leaves_from_html(tmp_path, encoding="utf-8")
+        text = combine_predicted_text(leaves, labels_for_nodes)
+    
+    print(f"[{model_name}] {page_id[:16]}: извлечено {len(text)} символов", file=sys.stderr)
     return text or ""
 

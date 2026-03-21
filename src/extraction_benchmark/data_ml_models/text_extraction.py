@@ -120,6 +120,21 @@ def combine_predicted_text(leaves: list[tuple[str, int]], predictions: list[int]
     return "\n".join(parts) if parts else ""
 
 
+def extract_text_from_predictions(
+    html_path: Path,
+    predictions: list[int],
+    encoding: str = "utf-8",
+) -> str:
+    """
+    Извлекает текст из HTML по предсказаниям модели (1=main).
+    
+    Порядок узлов и предсказаний должен соответствовать порядку обхода
+    узлов с data-ml в документе.
+    """
+    leaves = get_text_leaves_from_html(html_path, encoding=encoding)
+    return combine_predicted_text(leaves, predictions)
+
+
 def _is_descendant(el: _Element, anc: _Element) -> bool:
     """True, если el — потомок anc (или совпадает с anc)."""
     current = el
