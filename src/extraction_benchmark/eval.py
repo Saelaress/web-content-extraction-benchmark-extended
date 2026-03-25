@@ -197,6 +197,12 @@ def _map_axis_tick_labels(axis):
 
 
 def _draw_performance_boxsubplot(ax, model_scores, xlabels, ylabel):
+    if not xlabels or not model_scores:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_ylabel(ylabel)
+        ax.set_ylim((-0.1, 1.1))
+        _layout_ax(ax)
+        return
     ax.boxplot(
         model_scores,
         positions=range(len(xlabels)),
@@ -210,6 +216,12 @@ def _draw_performance_boxsubplot(ax, model_scores, xlabels, ylabel):
 
 
 def _draw_performance_barsubplot(ax, model_scores, lower_err, upper_err, xlabels, ylabel):
+    if not xlabels or not model_scores:
+        ax.text(0.5, 0.5, 'No data', ha='center', va='center', transform=ax.transAxes)
+        ax.set_ylabel(ylabel)
+        ax.set_ylim((0.0, 1.1))
+        _layout_ax(ax)
+        return
     ax.bar(
         xlabels,
         model_scores,
@@ -243,6 +255,8 @@ def _draw_performance_plot(plot_type, data, layout, suptitle, score_name):
 
 def _sort_vectors(*vals, reverse=True):
     """Sort multiple vectors / lists by values in the first one."""
+    if not vals or len(vals[0]) == 0:
+        return tuple([] for _ in vals)
     return zip(*sorted(zip(*vals), key=lambda x: x[0], reverse=reverse))
 
 
@@ -353,12 +367,17 @@ def _agg_model_at_complexity(complexity, in_df, score_name, score_cols, main_sco
 
 
 def _plot_score_histograms(title, score_df, out_file):
+    if score_df.empty:
+        return
     models = sorted(score_df.index.unique('model'), key=lambda m: score_df[m, :, :].median(), reverse=True)
+    if not models:
+        return
     cols = 4
     rows = math.ceil(len(models) / cols)
 
     fig, axs = plt.subplots(rows, cols, sharey=True, figsize=(2 * cols, 2 * rows))
-    for ax, m in zip(axs.flatten(), models):
+    ax_list = list(axs.flat) if hasattr(axs, 'flat') else [axs]
+    for ax, m in zip(ax_list, models):
         ax.hist(
             score_df[m, :, :],
             bins=25
@@ -369,9 +388,8 @@ def _plot_score_histograms(title, score_df, out_file):
         ax.set_xticks([0, 0.5, 1])
         ax.set_yticklabels([])
 
-    # Hide empty plots
-    if len(models) % cols:
-        [ax.set_visible(False) for ax in axs[-1][len(models) % cols:].flatten()]
+    for ax in ax_list[len(models):]:
+        ax.set_visible(False)
 
     fig.suptitle(title)
     plt.tight_layout()
@@ -402,10 +420,13 @@ def aggregate_scores(score_name, models, datasets, complexities):
         score_cols = ['dist']
         main_score_col = 'dist'
 
-    comp_quant_path = os.path.join(METRICS_COMPLEXITY_PATH, 'complexity_quantiles.csv')
-    q = pd.read_csv(comp_quant_path, index_col=0)
-    compl_range = {'all': None}
-    compl_range.update({k: v for k, v in zip(COMPLEXITIES, pairwise([0, float(q.loc[0.25]), float(q.loc[0.75]), 1]))})
+    compl_range: dict[str, tuple[float, float] | None] = {'all': None}
+    if any(c != 'all' for c in complexities):
+        comp_quant_path = os.path.join(METRICS_COMPLEXITY_PATH, 'complexity_quantiles.csv')
+        q = pd.read_csv(comp_quant_path, index_col=0)
+        compl_range.update(
+            {k: v for k, v in zip(COMPLEXITIES, pairwise([0, float(q.loc[0.25]), float(q.loc[0.75]), 1]))}
+        )
 
     if score_name == 'rouge':
         title_box = 'ROUGE-LSum Median $F_1$ Page Scores'
@@ -442,6 +463,11 @@ def aggregate_scores(score_name, models, datasets, complexities):
                 score_df = pd.concat([score_df, df])
 
             hist_file_prefix = f'_complexity_{comp}' if comp != 'all' else ''
+            if score_df.empty:
+                # Нет строк после фильтра по сложности (часто: hash_key в метриках ≠ в _complexity/<ds>/)
+                boxplot_data.append([[], [], f'Complexity: {comp.capitalize()}'])
+                barplot_data.append([[], [], [], [], f'Complexity: {comp.capitalize()}'])
+                continue
             _plot_score_histograms(f'{title_hist} (Complexity: {comp.capitalize()})', score_df[main_score_col],
                                    os.path.join(score_in_path, f'{score_name}{hist_file_prefix}_hist.pdf'))
 

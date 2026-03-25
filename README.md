@@ -10,6 +10,7 @@ This repository extends the original benchmark with the following enhancements:
 
 - **New evaluation metric**: Added BLEU score evaluation alongside ROUGE and Levenshtein metrics
 - **New extraction model**: Integrated Crawl4AI for web content extraction
+- **PyG extractor**: Graph neural network (PyTorch Geometric) over the annotated DOM, with FastText node features
 - **Extended datasets**: Added Canola and Newspaper3k datasets to the benchmark
 
 The original paper is a reproducibility study of state-of-the-art web page main content extraction tools. This repository provides both the raw data from the paper and the tools used for creating them. Following are usage instructions for combining existing annotated datasets to a common format and for running and evaluating the content extraction systems on this combined dataset.
@@ -75,7 +76,37 @@ wceb extract -m readability -m resiliparse -d scrapinghub
 This will run only Readability and Resiliparse on the Scrapinghub dataset. Enter `wceb extract --help` for more information.
 
 
-**NOTE:** If you have a CUDA-capable GPU but limited graphics memory, you may want to run neural models with ``--parallelism=1``. This concerns the `boilernet` and `web2text` extractors (see below).
+**NOTE:** If you have a CUDA-capable GPU but limited graphics memory, you may want to run neural models with ``--parallelism=1``. This concerns the `boilernet`, `web2text`, and `pyg` extractors (see below).
+
+
+### Run PyG
+
+The `pyg` extractor runs a small GraphSAGE-style model on the DOM (after `data-ml` annotation attributes are injected). Node features combine numeric DOM signals, FastText embeddings of visible text, HTML tag names, and CSS class tokens.
+
+**Required files** in `third-party/pyg-models/`:
+
+- `pyg_gnn.pt` — GNN checkpoint (small)
+- `pyg_preprocessors.pt` — scalers, label encoders, metadata (small)
+
+**Not shipped in this repository** (large; ignored by `.gitignore`):
+
+- **`cc.en.300.bin`** — English FastText word vectors trained on Common Crawl (300-dimensional `.bin` model used at inference).
+
+Download the file yourself, for example from the [FastText pretrained vectors page](https://fasttext.cc/docs/en/pretrained-vectors.html) (section *English*, choose the **bin** `cc.en.300.bin`). The file is on the order of **several gigabytes**; place it exactly here:
+
+```text
+third-party/pyg-models/cc.en.300.bin
+```
+
+Alternatively, set the environment variable `FASTTEXT_MODEL_PATH` to the absolute path of your `.bin` file. If the file is missing, extraction fails with a clear `FileNotFoundError`.
+
+Run the extractor like any other model:
+
+```console
+wceb extract -m pyg -d canola
+```
+
+Use `-p 1` (or lower parallelism) if GPU memory is tight.
 
 
 ### Run Web2Text
@@ -165,6 +196,7 @@ This fork includes the following modifications and additions:
 
 - **BLEU metric**: Added BLEU score evaluation for assessing extraction quality
 - **Crawl4AI integration**: Added Crawl4AI as a new extraction model using WebScrapingStrategy and DefaultMarkdownGenerator
+- **PyG extractor**: DOM-level GNN extractor; FastText `cc.en.300.bin` must be downloaded separately (see *Run PyG*)
 - **Extended datasets**: Added Canola and Newspaper3k datasets to expand the benchmark coverage
 
 ## Cite

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import re
 
 
@@ -259,37 +260,23 @@ def extract_crawl4ai(html, **kwargs):
             return ""
 
 
-def extract_data_ml_lr(html, page_id, **_):
-    """
-    Экстрактор на основе LogisticRegression (data-ml признаки).
-    """
+def extract_pyg(html, **kwargs):
+    """Нативный PyG-экстрактор, полностью внутри benchmark."""
+    logger = logging.getLogger('wceb-extract')
+    page_id = kwargs.get('page_id', '')
     try:
-        from extraction_benchmark.data_ml_models import extract_with_model
-    except ImportError:
+        from extraction_benchmark.extractors.data_ml_models.pyg_runtime import extract_with_pyg  # noqa: WPS433
+        return extract_with_pyg(html, str(page_id)) or ""
+    except ImportError as e:
+        logger.error(
+            "[pyg] нет зависимостей (torch, torch-geometric, fasttext). "
+            "Установите: poetry install --with pyg  или  pip install torch torch-geometric fasttext. "
+            f"Детали: {e}"
+        )
         return ""
-    return extract_with_model(html, page_id, "lr")
-
-
-def extract_data_ml_rf(html, page_id, **_):
-    """
-    Экстрактор на основе RandomForest (data-ml признаки).
-    """
-    try:
-        from extraction_benchmark.data_ml_models import extract_with_model
-    except ImportError:
+    except Exception as e:
+        logger.error(f"[pyg] ошибка извлечения ({page_id}): {e}")
         return ""
-    return extract_with_model(html, page_id, "rf")
-
-
-def extract_data_ml_catboost(html, page_id, **_):
-    """
-    Экстрактор на основе CatBoost (data-ml признаки).
-    """
-    try:
-        from extraction_benchmark.data_ml_models import extract_with_model
-    except ImportError:
-        return ""
-    return extract_with_model(html, page_id, "catboost")
 
 
 def _get_ensemble_model_list(best_only=False, weighted=False):

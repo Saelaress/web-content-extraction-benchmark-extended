@@ -51,3 +51,4 @@ datasets/combined/
 datasets/raw/
 
 outputs/html-features/
+third-party/pyg-models/cc.en.300.bin
