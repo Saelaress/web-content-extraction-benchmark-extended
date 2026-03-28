@@ -1,8 +1,8 @@
 # -*- coding: utf-8 -*-
 """
-Аннотация HTML-узлов атрибутом data-ml (признаки узла DOM, без class/id).
+Аннотация HTML-узлов атрибутом data-ml
+(признаки из одной страницы, без class/id) через bs4 + html5lib.
 Используется экстрактором PyG перед инференсом на «голом» HTML бенчмарка.
-Схема JSON совместима с обучением PyG (числовые и категориальные поля в pyg_runtime.FEATURE_SPEC).
 """
 
 from __future__ import annotations
@@ -14,19 +14,19 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from lxml import html as lxml_html
-    from lxml.etree import Element, _Element
+    from bs4 import BeautifulSoup
+    from bs4.element import Tag
 except ImportError:
-    lxml_html = None
-    Element = _Element = None
+    BeautifulSoup = None
+    Tag = None
 
 try:
-    from langdetect import LangDetectException, detect_langs
-
+    from langdetect import detect_langs, LangDetectException
     _HAS_LANGDETECT = True
 except ImportError:
     _HAS_LANGDETECT = False
     LangDetectException = Exception  # noqa: A001
+
 
 SCHEMA_VERSION = 1
 
@@ -35,7 +35,6 @@ EXCLUDED_TAGS = frozenset(
 )
 
 RE_EMAIL = re.compile(r"\S+@\S+\.\S+")
-
 PUNCTUATION_CHARS = set(".,!?;:\u2014\u2013-")
 
 
@@ -52,77 +51,82 @@ def _sentence_count(text: str) -> int:
     return max(1, len([p for p in parts if p.strip()]))
 
 
-def _get_depth(element: _Element, root: _Element) -> int:
+def _iter_tags(element: Any):
+    if isinstance(element, Tag):
+        yield element
+    for el in getattr(element, "descendants", []):
+        if isinstance(el, Tag):
+            yield el
+
+
+def _child_tags(element: Tag) -> list[Tag]:
+    return [c for c in element.children if isinstance(c, Tag)]
+
+
+def _get_depth(element: Tag, root: Any) -> int:
     depth = 0
     cur = element
     while cur is not None and cur != root:
         depth += 1
-        cur = cur.getparent()
+        cur = cur.parent
     return depth
 
 
-def _get_distance(from_el: _Element, to_el: _Element) -> int:
+def _get_distance(from_el: Tag, to_el: Tag) -> int:
     d = 0
     cur = from_el
     while cur is not None and cur != to_el:
         d += 1
-        cur = cur.getparent()
+        cur = cur.parent
     return d
 
 
-def _get_subtree_text(element: _Element) -> str:
-    return (element.text_content() or "").strip()
+def _get_subtree_text(element: Tag) -> str:
+    return (element.get_text(" ", strip=True) or "").strip()
 
 
-def _get_link_text_length(element: _Element) -> int:
+def _get_link_text_length(element: Tag) -> int:
     total = 0
-    for a in element.iter("a"):
-        total += len((a.text_content() or "").strip())
+    for a in element.find_all("a"):
+        total += len((a.get_text(" ", strip=True) or "").strip())
     return total
 
 
-def _count_leaves(element: _Element) -> int:
+def _count_leaves(element: Tag) -> int:
     count = 0
-    for el in element.iter():
-        if el.tag is None or callable(el.tag) or not isinstance(el.tag, str):
-            continue
-        has_element_child = any(
-            getattr(c, "tag", None) is not None and not callable(getattr(c, "tag", None))
-            for c in list(el)
-        )
+    for el in _iter_tags(element):
+        has_element_child = any(True for _ in _child_tags(el))
         if not has_element_child:
             count += 1
     return count
 
 
-def _tag_name(el: _Element) -> str:
-    if el.tag is None:
+def _tag_name(el: Any) -> str:
+    if not isinstance(el, Tag):
         return ""
-    if callable(el.tag):
-        return ""
-    return (el.tag if isinstance(el.tag, str) else str(el.tag)).lower()
+    return (el.name or "").lower()
 
 
-def _has_ancestor_article(element: _Element, root: _Element) -> bool:
-    cur = element.getparent()
+def _has_ancestor_article(element: Tag, root: Any) -> bool:
+    cur = element.parent
     while cur is not None and cur != root:
         if _tag_name(cur) == "article":
             return True
-        cur = cur.getparent()
+        cur = cur.parent
     return False
 
 
-def _has_microdata_article(element: _Element) -> bool:
-    for el in element.iter():
+def _has_microdata_article(element: Tag) -> bool:
+    for el in _iter_tags(element):
         itemprop = (el.get("itemprop") or "").strip()
         if "articlebody" in itemprop.lower() or "article" in itemprop.lower():
             return True
     return False
 
 
-def _image_caption_ratio(element: _Element) -> float:
-    imgs = list(element.iter("img"))
-    figcaps = list(element.iter("figcaption"))
+def _image_caption_ratio(element: Tag) -> float:
+    imgs = element.find_all("img")
+    figcaps = element.find_all("figcaption")
     n_img = len(imgs)
     n_fig = len(figcaps)
     if n_img == 0:
@@ -130,29 +134,24 @@ def _image_caption_ratio(element: _Element) -> float:
     return round(n_fig / n_img, 6)
 
 
-def _list_internal_link_ratio(element: _Element) -> float:
-    lis = list(element.iter("li"))
+def _list_internal_link_ratio(element: Tag) -> float:
+    lis = element.find_all("li")
     if not lis:
         return 0.0
-    with_links = sum(1 for li in lis if li.find(".//a") is not None)
+    with_links = sum(1 for li in lis if li.find("a") is not None)
     return round(with_links / len(lis), 6)
 
 
-def _word_ratio_def31(element: _Element) -> float:
+def _word_ratio_def31(element: Tag) -> float:
     total = 0.0
-    for el in element.iter():
-        if el.tag is None or callable(el.tag) or not isinstance(el.tag, str):
-            continue
-        parent = el.getparent()
+    for el in _iter_tags(element):
+        parent = el.parent
         if parent is not None and _tag_name(parent) == "a":
             continue
-        has_child_el = any(
-            getattr(c, "tag", None) is not None and not callable(getattr(c, "tag", None))
-            for c in list(el)
-        )
+        has_child_el = any(True for _ in _child_tags(el))
         if has_child_el:
             continue
-        text = (el.text_content() or "").strip()
+        text = (el.get_text(" ", strip=True) or "").strip()
         w = len(_tokenize_words(text))
         if w == 0:
             continue
@@ -174,12 +173,12 @@ def _language_features(text: str) -> tuple[str, float]:
         return ("", 0.0)
 
 
-def _compute_subtree_stats(element: _Element) -> dict[str, Any]:
+def _compute_subtree_stats(element: Tag) -> dict[str, Any]:
     text = _get_subtree_text(element)
     words = _tokenize_words(text)
-    tag_count = sum(1 for _ in element.iter())
+    tag_count = sum(1 for _ in _iter_tags(element))
     num_leaves = _count_leaves(element)
-    link_count = len(element.findall(".//a"))
+    link_count = len(element.find_all("a"))
     link_text_length = _get_link_text_length(element)
     text_length_chars = len(text)
     word_count = len(words)
@@ -198,16 +197,16 @@ def _compute_subtree_stats(element: _Element) -> dict[str, Any]:
 
 
 def _build_data_ml(
-    element: _Element,
-    root: _Element,
+    element: Tag,
+    root: Any,
     max_depth: int,
     subtree: dict[str, Any],
 ) -> dict[str, Any]:
     depth = _get_depth(element, root)
     tag_name = _tag_name(element)
-    parent = element.getparent()
+    parent = element.parent if isinstance(element.parent, Tag) else None
     parent_tag = _tag_name(parent) if parent is not None else ""
-    grandparent = parent.getparent() if parent is not None else None
+    grandparent = parent.parent if (parent is not None and isinstance(parent.parent, Tag)) else None
     grandparent_tag = _tag_name(grandparent) if grandparent is not None else ""
 
     tc = subtree["tag_count"]
@@ -225,10 +224,7 @@ def _build_data_ml(
     words_per_leaf = round(wc / max(1, nl), 6) if nl else 0.0
     chars_per_descendant = round(tl / max(1, tc), 6)
     links_per_descendant = round(lc / max(1, tc), 6)
-    num_children = sum(
-        1 for c in list(element)
-        if getattr(c, "tag", None) is not None and not callable(getattr(c, "tag", None))
-    )
+    num_children = len(_child_tags(element))
     children_ratio = round(num_children / max(1, tc), 6)
 
     digit_ratio = round(sum(1 for c in text if c.isdigit()) / max(1, tl), 6)
@@ -242,7 +238,7 @@ def _build_data_ml(
 
     has_visible_text = tl > 0
     is_whitespace_only = not text.strip() if text else True
-    has_only_links = lc > 0 and tl > 0 and lt >= tl * 0.99
+    has_only_links = (lc > 0 and tl > 0 and lt >= tl * 0.99)
 
     depth_norm = round(depth / max(1, max_depth), 6)
 
@@ -318,9 +314,9 @@ def _build_data_ml(
     }
 
 
-def _get_max_depth(root: _Element) -> int:
+def _get_max_depth(root: Any) -> int:
     max_d = 0
-    for el in root.iter():
+    for el in _iter_tags(root):
         d = _get_depth(el, root)
         if d > max_d:
             max_d = d
@@ -328,35 +324,22 @@ def _get_max_depth(root: _Element) -> int:
 
 
 def annotate_html(html_input: str) -> str:
-    """
-    Принимает HTML-строку, возвращает HTML с атрибутами data-ml на каждом element-узле.
-    """
-    if not lxml_html:
-        raise RuntimeError("Требуется lxml. Установите: pip install lxml")
+    if not BeautifulSoup:
+        raise RuntimeError(
+            "Требуется bs4 + html5lib. Установите: pip install beautifulsoup4 html5lib"
+        )
 
-    doc = lxml_html.fromstring(html_input)
-    root = doc.getroottree().getroot()
-    if root is None:
-        return html_input
-
+    soup = BeautifulSoup(html_input, "html5lib")
+    root = soup
     max_depth = _get_max_depth(root)
 
-    for element in root.iter():
-        if element.tag is None or callable(element.tag):
-            continue
-        if not isinstance(element.tag, str):
-            continue
+    for element in _iter_tags(root):
         subtree = _compute_subtree_stats(element)
         data_ml = _build_data_ml(element, root, max_depth, subtree)
         json_str = json.dumps(data_ml, ensure_ascii=False)
-        element.set("data-ml", json_str)
+        element["data-ml"] = json_str
 
-    return lxml_html.tostring(
-        doc,
-        encoding="unicode",
-        method="html",
-        pretty_print=False,
-    )
+    return str(soup)
 
 
 def annotate_file(path: Path | str, encoding: str = "utf-8") -> str:
@@ -371,7 +354,10 @@ def annotate_file(path: Path | str, encoding: str = "utf-8") -> str:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print("Usage: python -m extraction_benchmark.extractors.data_ml_models.annotate_dom <in.html> [out.html]", file=sys.stderr)
+        print(
+            "Usage: python -m extraction_benchmark.extractors.data_ml_models.annotate_dom <in.html> [out.html]",
+            file=sys.stderr,
+        )
         sys.exit(1)
     inp = Path(sys.argv[1])
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else None

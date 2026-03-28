@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+"""
+Рантайм PyG для бенчмарка. NodeEncoder / DOMSAGEClassifier должны совпадать с
+`6 обучение модели/gnn_model.py`, иначе загрузка `pyg_gnn.pt` несовместима.
+"""
 from __future__ import annotations
 
 import json
@@ -51,34 +55,80 @@ FEATURE_SPEC = [
 ]
 UNKNOWN_CATEGORY = "__unknown__"
 _LEAKAGE_CLASSES = frozenset({LABEL_MAIN, LABEL_TEMPLATE})
+# Индекс 0 в nn.Embedding — UNK / пустой тег; известные теги с 1 (как pyg_features.TAG_UNK_INDEX)
+TAG_UNK_INDEX = 0
 
 
 class NodeEncoder(nn.Module):
-    def __init__(self, ft_dim: int, embed_dim: int, num_numeric: int, hidden_dim: int) -> None:
+    """Embedding(тег) + проекции текста/class из FastText, concat → linear; числовой блок."""
+
+    def __init__(
+        self,
+        ft_dim: int,
+        embed_dim: int,
+        num_tag_embeddings: int,
+        num_numeric: int,
+        hidden_dim: int,
+    ) -> None:
         super().__init__()
-        self.proj_tag = nn.Linear(ft_dim, embed_dim)
+        self.tag_embed = nn.Embedding(num_tag_embeddings, embed_dim)
         self.proj_text = nn.Linear(ft_dim, embed_dim)
         self.proj_class = nn.Linear(ft_dim, embed_dim)
         self.proj_num = nn.Linear(num_numeric, hidden_dim)
-        self.merge = nn.Linear(embed_dim, hidden_dim)
+        self.merge = nn.Linear(3 * embed_dim, hidden_dim)
 
-    def forward(self, x_tag: torch.Tensor, x_text: torch.Tensor, x_class: torch.Tensor, x_num: torch.Tensor) -> torch.Tensor:
-        h_textual = self.proj_tag(x_tag) + self.proj_text(x_text) + self.proj_class(x_class)
-        return self.merge(h_textual) + self.proj_num(x_num)
+    def forward(
+        self,
+        x_tag: torch.Tensor,
+        x_text: torch.Tensor,
+        x_class: torch.Tensor,
+        x_num: torch.Tensor,
+    ) -> torch.Tensor:
+        e_tag = self.tag_embed(x_tag.long())
+        h_textual = torch.cat([e_tag, self.proj_text(x_text), self.proj_class(x_class)], dim=-1)
+        h_textual = self.merge(h_textual)
+        h_num = self.proj_num(x_num)
+        return h_textual + h_num
 
 
 class DOMSAGEClassifier(nn.Module):
-    def __init__(self, ft_dim: int, embed_dim: int, num_numeric: int, hidden_dim: int, num_gnn_layers: int) -> None:
-        super().__init__()
-        self.encoder = NodeEncoder(ft_dim, embed_dim, num_numeric, hidden_dim)
-        self.dropout = nn.Dropout(0.1)
-        self.convs = nn.ModuleList([SAGEConv(hidden_dim, hidden_dim) for _ in range(num_gnn_layers)])
-        self.head = nn.Linear(hidden_dim, 2)
+    """child→parent рёбра: родитель агрегирует детей."""
 
-    def forward(self, x_tag: torch.Tensor, x_text: torch.Tensor, x_class: torch.Tensor, x_num: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        h = F.relu(self.encoder(x_tag, x_text, x_class, x_num))
+    def __init__(
+        self,
+        ft_dim: int,
+        embed_dim: int,
+        num_tag_embeddings: int,
+        num_numeric: int,
+        hidden_dim: int,
+        num_gnn_layers: int,
+        num_classes: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.encoder = NodeEncoder(
+            ft_dim, embed_dim, num_tag_embeddings, num_numeric, hidden_dim
+        )
+        self.dropout = nn.Dropout(dropout)
+        self.convs = nn.ModuleList()
+        for _ in range(num_gnn_layers):
+            self.convs.append(SAGEConv(hidden_dim, hidden_dim))
+        self.head = nn.Linear(hidden_dim, num_classes)
+
+    def forward(
+        self,
+        x_tag: torch.Tensor,
+        x_text: torch.Tensor,
+        x_class: torch.Tensor,
+        x_num: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        h = self.encoder(x_tag, x_text, x_class, x_num)
+        h = F.relu(h)
         for conv in self.convs:
-            h = F.relu(conv(self.dropout(h), edge_index))
+            h = self.dropout(h)
+            h = conv(h, edge_index)
+            h = F.relu(h)
         return self.head(h)
 
 
@@ -212,11 +262,16 @@ def _build_edge_index(elements: list[Any]) -> torch.Tensor:
     return torch.tensor([src, dst], dtype=torch.long)
 
 
-def _sanitize_classes(class_attr: str | None) -> list[str]:
+def _sanitize_classes(class_attr: str | list[str] | None) -> list[str]:
+    """Токены class без меток разметки (как pyg_features.sanitize_class_for_embedding)."""
     if not class_attr:
         return []
-    parts = [p.strip() for p in str(class_attr).split() if p.strip()]
-    return [p for p in parts if p not in _LEAKAGE_CLASSES]
+    if isinstance(class_attr, list):
+        raw_tokens = class_attr
+    else:
+        raw_tokens = str(class_attr).split()
+    tokens = [t.strip() for t in raw_tokens if t and str(t).strip()]
+    return [t for t in tokens if t not in _LEAKAGE_CLASSES]
 
 
 def _tokenize_words(text: str) -> list[str]:
@@ -244,11 +299,19 @@ def _visible_text(el) -> str:
 
 
 def _avg_word_vectors(ft_model, words: list[str]) -> np.ndarray:
+    """Как pyg_features._avg_word_vectors: пустой список → нули; слова без вектора пропускаются."""
     dim = int(ft_model.get_dimension())
     if not words:
         return np.zeros(dim, dtype=np.float32)
-    vecs = [np.asarray(ft_model.get_word_vector(w), dtype=np.float32) for w in words]
-    return np.mean(np.stack(vecs, axis=0), axis=0).astype(np.float32) if vecs else np.zeros(dim, dtype=np.float32)
+    vecs = []
+    for w in words:
+        try:
+            vecs.append(np.asarray(ft_model.get_word_vector(w), dtype=np.float32))
+        except Exception:
+            continue
+    if not vecs:
+        return np.zeros(dim, dtype=np.float32)
+    return np.mean(np.stack(vecs, axis=0), axis=0).astype(np.float32)
 
 
 @lru_cache(maxsize=1)
@@ -267,17 +330,27 @@ def _load_bundle():
             f"{default_ft.parent}"
         )
     import fasttext
+
     ft_model = fasttext.load_model(str(cand.resolve()))
+    num_tag_embeddings = int(prep.get("num_tag_embeddings", 0))
+    if num_tag_embeddings <= 0 or "tag_stoi" not in prep:
+        raise ValueError(
+            "В pyg_preprocessors.pt нет tag_stoi/num_tag_embeddings (нужен формат после precompute_features). "
+            "Пересоберите препроцессоры и скопируйте артефакты в third-party/pyg-models/."
+        )
     model = DOMSAGEClassifier(
         ft_dim=int(prep["ft_dim"]),
         embed_dim=int(prep.get("embed_dim", 16)),
+        num_tag_embeddings=num_tag_embeddings,
         num_numeric=int(prep["num_numeric"]),
         hidden_dim=int(prep.get("hidden_dim", 64)),
         num_gnn_layers=int(prep.get("num_gnn_layers", 2)),
+        num_classes=2,
+        dropout=0.1,
     )
     model.load_state_dict(ckpt["state_dict"])
     model.eval()
-    return model, ft_model, prep["label_encoders"], prep["scaler"]
+    return model, ft_model, prep
 
 
 def _predict_labels(root) -> tuple[list[Any], list[int]]:
@@ -287,16 +360,21 @@ def _predict_labels(root) -> tuple[list[Any], list[int]]:
     elements, data_mls = zip(*pairs)
     elements = list(elements)
     data_mls = list(data_mls)
-    model, ft_model, label_encoders, scaler = _load_bundle()
+    model, ft_model, prep = _load_bundle()
+    label_encoders = prep["label_encoders"]
+    scaler = prep["scaler"]
+    tag_stoi = prep["tag_stoi"]
     edge_index = _build_edge_index(elements)
 
-    tag_l: list[np.ndarray] = []
+    tag_idx: list[int] = []
     text_l: list[np.ndarray] = []
     class_l: list[np.ndarray] = []
     for el in elements:
-        tag_w = _tag_name(el)
-        dim = int(ft_model.get_dimension())
-        tag_l.append(np.asarray(ft_model.get_word_vector(tag_w), dtype=np.float32) if tag_w else np.zeros(dim, dtype=np.float32))
+        tw = _tag_name(el)
+        if not tw:
+            tag_idx.append(TAG_UNK_INDEX)
+        else:
+            tag_idx.append(int(tag_stoi.get(tw, TAG_UNK_INDEX)))
         text_l.append(_avg_word_vectors(ft_model, _tokenize_words(_visible_text(el))))
         class_l.append(_avg_word_vectors(ft_model, _sanitize_classes(el.get("class"))))
 
@@ -304,7 +382,7 @@ def _predict_labels(root) -> tuple[list[Any], list[int]]:
     x_num = _to_numeric_matrix(flat_rows, label_encoders=label_encoders)
     x_num = scaler.transform(x_num.astype(np.float64))
 
-    x_tag = torch.from_numpy(np.stack(tag_l, axis=0)).float()
+    x_tag = torch.tensor(tag_idx, dtype=torch.long)
     x_text = torch.from_numpy(np.stack(text_l, axis=0)).float()
     x_class = torch.from_numpy(np.stack(class_l, axis=0)).float()
     x_num_t = torch.from_numpy(x_num.astype(np.float32)).float()

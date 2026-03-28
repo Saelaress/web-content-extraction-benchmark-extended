@@ -12,57 +12,75 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from collections import defaultdict
-import json
+import errno
+import logging
 import os
-import warnings
+import subprocess
+import tempfile
 
-import numpy as np
-from bs4 import BeautifulSoup
-import nltk
+from extraction_benchmark.paths import THIRD_PARTY_PATH
 
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-import tensorflow as tf
+_logger = logging.getLogger("wceb.boilernet")
 
-from .net.preprocess import get_feature_vector, get_leaves, process
-
-BOILERNET_ROOT_PATH = os.path.dirname(os.path.abspath(__file__))
-
-_model = None
-_word_map = None
-_tag_map = None
-
-def load_model():
-    global _model, _word_map, _tag_map
-    if not _model:
-        _model = tf.keras.models.load_model(os.path.join(BOILERNET_ROOT_PATH, 'model.h5'))
-        nltk.download('punkt', quiet=True)
-        with open(os.path.join(BOILERNET_ROOT_PATH, 'words.json')) as f:
-            _word_map = json.load(f)
-        with open(os.path.join(BOILERNET_ROOT_PATH, 'tags.json')) as f:
-            _tag_map = json.load(f)
-    return _model, _word_map, _tag_map
+BOILERNET_THIRD_PARTY_PATH = os.path.join(THIRD_PARTY_PATH, "boilernet-tf1")
+BOILERNET_VENV_PATH = os.path.join(BOILERNET_THIRD_PARTY_PATH, "venv")
+BOILERNET_RUNNER = os.path.join(BOILERNET_THIRD_PARTY_PATH, "run_boilernet.py")
 
 
-def extract(html):
-    model, word_map, tag_map = load_model()
+def _venv_python() -> str:
+    for candidate in ("python3.7", "python3", "python"):
+        python_path = os.path.join(BOILERNET_VENV_PATH, "bin", candidate)
+        if os.path.isfile(python_path):
+            return python_path
+    raise FileNotFoundError(
+        errno.ENOENT,
+        BOILERNET_VENV_PATH,
+        "Для Boilernet создайте venv с TensorFlow 1.15: "
+        "python3.7 -m venv third-party/boilernet-tf1/venv && "
+        "source third-party/boilernet-tf1/venv/bin/activate && "
+        "pip install tensorflow==1.15.0 beautifulsoup4==4.12.3 html5lib==1.1 nltk==3.8.1 numpy==1.24.2",
+    )
 
-    tags = defaultdict(int)
-    words = defaultdict(int)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        doc = BeautifulSoup(html, features='html5lib')
-    processed = process(doc, tags, words)
-    if not processed:
-        return ''
 
-    inputs = [get_feature_vector(w, t, word_map, tag_map) for w, t, _ in processed]
-    inputs = np.expand_dims(np.stack(inputs), 0)
-    predicted = np.around(model.predict(inputs, verbose=0))
+def extract(html: str) -> str:
+    if not os.path.isdir(BOILERNET_VENV_PATH):
+        raise FileNotFoundError(
+            errno.ENOENT,
+            BOILERNET_VENV_PATH,
+            "Boilernet venv отсутствует. См. SETUP.md — раздел Boilernet (TensorFlow 1.15).",
+        )
+    if not os.path.isfile(BOILERNET_RUNNER):
+        raise FileNotFoundError(
+            errno.ENOENT,
+            BOILERNET_RUNNER,
+            "Отсутствует скрипт run_boilernet.py в third-party/boilernet-tf1.",
+        )
 
-    main_content = ''
-    doc = BeautifulSoup(html, features='html5lib')
-    for i, (leaf, _, _) in enumerate(get_leaves(doc.find_all('html')[0])):
-        if predicted[0, i, 0]:
-            main_content += leaf + '\n'
-    return main_content.strip()
+    python_bin = _venv_python()
+
+    with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False, encoding="utf-8") as html_file:
+        html_file.write(html)
+        html_path = html_file.name
+
+    proc_env = os.environ.copy()
+    proc_env["VIRTUAL_ENV"] = BOILERNET_VENV_PATH
+    proc_env["PATH"] = os.path.join(BOILERNET_VENV_PATH, "bin") + ":" + proc_env.get("PATH", "")
+
+    try:
+        proc = subprocess.run(
+            [python_bin, BOILERNET_RUNNER, html_path],
+            env=proc_env,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            _logger.warning("Boilernet subprocess stderr:\n%s", (proc.stderr or "").strip())
+            _logger.warning("Boilernet subprocess stdout:\n%s", (proc.stdout or "").strip())
+            return ""
+
+        return (proc.stdout or "").strip()
+    finally:
+        try:
+            os.remove(html_path)
+        except OSError:
+            pass

@@ -130,11 +130,17 @@ pip install numpy==1.18.0 tensorflow==1.15.0 tensorflow-gpu==1.15.0 protobuf==3.
 deactivate
 ```
 
+You also need **Scala**, **Java 8** (for the JVM that runs the Web2Text JAR), and the fat JAR at **`third-party/web2text.jar`** (included in this fork). If Java 8 is not at `/usr/lib/jvm/java-8-openjdk-amd64`, set **`WCEB_JAVA_HOME`** or **`JAVA_HOME`** to your JDK 8 path before running extraction.
+
 Back from the repository root, you can now run Web2Text:
 
 ```console
 wceb extract -m web2text -p 1
 ```
+
+### Run Boilernet
+
+Boilernet also uses TensorFlow 1.15 and therefore executes inside a dedicated Python 3.7 venv located at `third-party/boilernet-tf1/venv`. The helper script `third-party/boilernet-tf1/run_boilernet.py` boots that venv, loads the TF1 model, and prints the extracted text; it is invoked automatically by `wceb extract -m boilernet`.
 
 ## Evaluate extraction results
 

@@ -2,7 +2,7 @@
 
 Web2Text needs Tensorflow 1.x and Scala with Java < 11. To match the requirements, create a Python 3.7 venv named `venv` in this directory:
 
-    python3.7 -m venv
+    python3.7 -m venv venv
     source venv/bin/activate
 
 Then run

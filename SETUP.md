@@ -82,7 +82,26 @@ cd ../..
 
 Запуск Web2Text: `poetry run wceb extract -m web2text -d data-ml-test -p 1`
 
-### 5. Использование
+### 5. Boilernet (TensorFlow 1.15)
+
+Boilernet требует **TensorFlow 1.15**, поэтому запускается в отдельном Python 3.7 venv:
+
+```bash
+mkdir -p third-party/boilernet-tf1
+python3.7 -m venv third-party/boilernet-tf1/venv
+source third-party/boilernet-tf1/venv/bin/activate
+pip install --upgrade pip
+pip install tensorflow==1.15.0 numpy==1.21.6 beautifulsoup4==4.12.3 html5lib==1.1 nltk==3.8.1 protobuf==3.20.3 h5py==2.10.0
+deactivate
+```
+
+Обёртка `third-party/boilernet-tf1/run_boilernet.py` читает HTML, загружает модель через TF1 и печатает текст. Основной экстрактор вызывает её через этот venv, поэтому достаточно только `wceb extract -m boilernet -d data-ml-test -p 1`. Проверить вручную можно так:
+
+```bash
+third-party/boilernet-tf1/venv/bin/python third-party/boilernet-tf1/run_boilernet.py datasets/combined/html/data-ml-test/<page_id>.html
+```
+
+### 6. Использование
 
 ```bash
 # Извлечение (один экстрактор, один датасет)
