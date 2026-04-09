@@ -161,10 +161,13 @@ def _word_ratio_def31(element: Tag) -> float:
 
 
 def _language_features(text: str) -> tuple[str, float]:
-    if not _HAS_LANGDETECT or not text or len(text.strip()) < 50:
+    if not _HAS_LANGDETECT or not text:
+        return ("", 0.0)
+    stripped = text.strip()
+    if len(stripped) < 10:
         return ("", 0.0)
     try:
-        langs = detect_langs(text)
+        langs = detect_langs(stripped)
         if not langs:
             return ("", 0.0)
         top = langs[0]
@@ -242,7 +245,9 @@ def _build_data_ml(
 
     depth_norm = round(depth / max(1, max_depth), 6)
 
-    hyperlink_ratio_def31 = 1.0 if lc == 0 else round(1.0 / lc, 6)
+    # hyperlink_ratio = количество ссылок / количество тегов в поддереве
+    # (согласовано с links_per_descendant; узлы без ссылок дают 0.0)
+    hyperlink_ratio_def31 = round(lc / max(1, tc), 6)
     children_ratio_binary = 0 if num_children <= 2 else 1
     position_ratio = (
         1.0

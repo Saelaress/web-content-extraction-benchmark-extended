@@ -422,8 +422,8 @@ def _extract_text_from_labels(elements: list[Any], labels: list[int]) -> str:
 
 
 def extract_with_pyg(html: str, page_id: str = "") -> str:
-    del page_id
     if lxml_html is None:
+        _logger.warning("[pyg] lxml не установлен")
         return ""
     raw = html or ""
     if not raw.strip():
@@ -436,10 +436,26 @@ def extract_with_pyg(html: str, page_id: str = "") -> str:
         try:
             doc = lxml_html.fromstring(annotated.encode("utf-8", errors="replace"))
         except Exception:
+            _logger.warning("[pyg] (%s) lxml не смог распарсить HTML", page_id)
             return ""
     root = doc.getroottree().getroot()
     if root is None:
         return ""
-    elements, pred = _predict_labels(root)
-    return _extract_text_from_labels(elements, pred)
+    import pathlib, datetime, traceback
+    _dbg = pathlib.Path(__file__).parent / "pyg_debug.log"
+    with open(_dbg, "a", encoding="utf-8") as _f:
+        _f.write(f"{datetime.datetime.now().isoformat()} ({page_id}) before _predict_labels, root_tag={root.tag}\n")
+    try:
+        elements, pred = _predict_labels(root)
+    except Exception:
+        with open(_dbg, "a", encoding="utf-8") as _f:
+            _f.write(traceback.format_exc() + "\n")
+        return ""
+    n_main = sum(1 for p in pred if p == CLASS_MAIN)
+    with open(_dbg, "a", encoding="utf-8") as _f:
+        _f.write(f"{datetime.datetime.now().isoformat()} ({page_id}) nodes={len(elements)} predicted_main={n_main}\n")
+    result = _extract_text_from_labels(elements, pred)
+    with open(_dbg, "a", encoding="utf-8") as _f:
+        _f.write(f"{datetime.datetime.now().isoformat()} ({page_id}) extracted_chars={len(result)}\n")
+    return result
 
