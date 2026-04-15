@@ -132,6 +132,46 @@ class DOMSAGEClassifier(nn.Module):
         return self.head(h)
 
 
+class BiDirSAGEClassifier(nn.Module):
+    """Bidirectional GNN: каждый слой делает ↑ (child→parent) и ↓ (parent→child) параллельно."""
+
+    def __init__(
+        self,
+        ft_dim: int,
+        embed_dim: int,
+        num_tag_embeddings: int,
+        num_numeric: int,
+        hidden_dim: int,
+        num_layers: int,
+        num_classes: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.encoder = NodeEncoder(ft_dim, embed_dim, num_tag_embeddings, num_numeric, hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.up_convs   = nn.ModuleList([SAGEConv(hidden_dim, hidden_dim) for _ in range(num_layers)])
+        self.down_convs = nn.ModuleList([SAGEConv(hidden_dim, hidden_dim) for _ in range(num_layers)])
+        self.projs      = nn.ModuleList([nn.Linear(2 * hidden_dim, hidden_dim) for _ in range(num_layers)])
+        self.head = nn.Linear(hidden_dim, num_classes)
+
+    def forward(
+        self,
+        x_tag: torch.Tensor,
+        x_text: torch.Tensor,
+        x_class: torch.Tensor,
+        x_num: torch.Tensor,
+        edge_index: torch.Tensor,
+    ) -> torch.Tensor:
+        edge_index_down = edge_index[[1, 0], :] if edge_index.size(1) > 0 else edge_index
+        h = F.relu(self.encoder(x_tag, x_text, x_class, x_num))
+        for up_conv, down_conv, proj in zip(self.up_convs, self.down_convs, self.projs):
+            h = self.dropout(h)
+            h_up   = up_conv(h, edge_index)
+            h_down = down_conv(h, edge_index_down)
+            h = F.relu(proj(torch.cat([h_up, h_down], dim=-1)))
+        return self.head(h)
+
+
 def _repo_root() -> Path:
     """Корень репозитория web-content-extraction-benchmark (каталог с `src/`)."""
     return Path(__file__).resolve().parents[4]
@@ -353,6 +393,45 @@ def _load_bundle():
     return model, ft_model, prep
 
 
+@lru_cache(maxsize=1)
+def _load_cascade_bundle():
+    md = _models_dir()
+    prep = torch.load(md / "pyg_preprocessors.pt", map_location="cpu", weights_only=False)
+    ckpt = torch.load(md / "cascade_gnn.pt", map_location="cpu", weights_only=False)
+    ft_path = os.environ.get("FASTTEXT_MODEL_PATH", "").strip() or str(prep.get("fasttext_path") or "").strip()
+    default_ft = _repo_root() / "third-party" / "pyg-models" / "cc.en.300.bin"
+    cand = Path(ft_path).expanduser() if ft_path else default_ft
+    if not ft_path or not cand.is_file():
+        cand = default_ft
+    if not cand.is_file():
+        raise FileNotFoundError(
+            "Не найден файл FastText (.bin). Укажите FASTTEXT_MODEL_PATH или положите cc.en.300.bin в "
+            f"{default_ft.parent}"
+        )
+    import fasttext
+
+    ft_model = fasttext.load_model(str(cand.resolve()))
+    num_tag_embeddings = int(prep.get("num_tag_embeddings", 0))
+    if num_tag_embeddings <= 0 or "tag_stoi" not in prep:
+        raise ValueError(
+            "В pyg_preprocessors.pt нет tag_stoi/num_tag_embeddings. "
+            "Пересоберите препроцессоры и скопируйте артефакты в third-party/pyg-models/."
+        )
+    model = BiDirSAGEClassifier(
+        ft_dim=int(prep["ft_dim"]),
+        embed_dim=int(ckpt.get("embed_dim", 32)),
+        num_tag_embeddings=num_tag_embeddings,
+        num_numeric=int(prep["num_numeric"]),
+        hidden_dim=int(ckpt.get("hidden_dim", 128)),
+        num_layers=int(ckpt.get("num_layers", 3)),
+        num_classes=2,
+        dropout=0.1,
+    )
+    model.load_state_dict(ckpt["state_dict"])
+    model.eval()
+    return model, ft_model, prep
+
+
 def _predict_labels(root) -> tuple[list[Any], list[int]]:
     pairs = list(_iter_nodes(root)) if root is not None else []
     if not pairs:
@@ -419,6 +498,73 @@ def _extract_text_from_labels(elements: list[Any], labels: list[int]) -> str:
     text = re.sub(r" +", " ", text)
     text = re.sub(r"\n{2,}", "\n", text)
     return text.strip()
+
+
+def _predict_labels_cascade(root) -> tuple[list[Any], list[int]]:
+    pairs = list(_iter_nodes(root)) if root is not None else []
+    if not pairs:
+        return [], []
+    elements, data_mls = zip(*pairs)
+    elements = list(elements)
+    data_mls = list(data_mls)
+    model, ft_model, prep = _load_cascade_bundle()
+    label_encoders = prep["label_encoders"]
+    scaler = prep["scaler"]
+    tag_stoi = prep["tag_stoi"]
+    edge_index = _build_edge_index(elements)
+
+    tag_idx: list[int] = []
+    text_l: list[np.ndarray] = []
+    class_l: list[np.ndarray] = []
+    for el in elements:
+        tw = _tag_name(el)
+        if not tw:
+            tag_idx.append(TAG_UNK_INDEX)
+        else:
+            tag_idx.append(int(tag_stoi.get(tw, TAG_UNK_INDEX)))
+        text_l.append(_avg_word_vectors(ft_model, _tokenize_words(_visible_text(el))))
+        class_l.append(_avg_word_vectors(ft_model, _sanitize_classes(el.get("class"))))
+
+    flat_rows = [_data_ml_to_flat_row(d) for d in data_mls]
+    x_num = _to_numeric_matrix(flat_rows, label_encoders=label_encoders)
+    x_num = scaler.transform(x_num.astype(np.float64))
+
+    x_tag = torch.tensor(tag_idx, dtype=torch.long)
+    x_text = torch.from_numpy(np.stack(text_l, axis=0)).float()
+    x_class = torch.from_numpy(np.stack(class_l, axis=0)).float()
+    x_num_t = torch.from_numpy(x_num.astype(np.float32)).float()
+
+    with torch.no_grad():
+        logits = model(x_tag, x_text, x_class, x_num_t, edge_index)
+        pred = logits.argmax(dim=-1).cpu().numpy().astype(int).tolist()
+    return elements, pred
+
+
+def extract_with_cascade(html: str, page_id: str = "") -> str:
+    if lxml_html is None:
+        _logger.warning("[cascade] lxml не установлен")
+        return ""
+    raw = html or ""
+    if not raw.strip():
+        return ""
+    annotated = _apply_dom_annotation(raw)
+    try:
+        doc = lxml_html.fromstring(annotated)
+    except Exception:
+        try:
+            doc = lxml_html.fromstring(annotated.encode("utf-8", errors="replace"))
+        except Exception:
+            _logger.warning("[cascade] (%s) lxml не смог распарсить HTML", page_id)
+            return ""
+    root = doc.getroottree().getroot()
+    if root is None:
+        return ""
+    try:
+        elements, pred = _predict_labels_cascade(root)
+    except Exception as e:
+        _logger.warning("[cascade] (%s) ошибка предсказания: %s", page_id, e)
+        return ""
+    return _extract_text_from_labels(elements, pred)
 
 
 def extract_with_pyg(html: str, page_id: str = "") -> str:

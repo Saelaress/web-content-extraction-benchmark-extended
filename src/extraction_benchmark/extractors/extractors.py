@@ -267,15 +267,20 @@ def extract_pyg(html, **kwargs):
     try:
         from extraction_benchmark.extractors.data_ml_models.pyg_runtime import extract_with_pyg  # noqa: WPS433
         return extract_with_pyg(html, str(page_id)) or ""
-    except ImportError as e:
-        logger.error(
-            "[pyg] нет зависимостей (torch, torch-geometric, fasttext). "
-            "Установите: poetry install --with pyg  или  pip install torch torch-geometric fasttext. "
-            f"Детали: {e}"
-        )
-        return ""
     except Exception as e:
-        logger.error(f"[pyg] ошибка извлечения ({page_id}): {e}")
+        logger.warning(f"[pyg] ошибка извлечения ({page_id}): {e}")
+        return ""
+
+
+def extract_cascade(html, **kwargs):
+    """Каскадная GNN (Bottom-Up + Top-Down), эксперимент 2."""
+    logger = logging.getLogger('wceb-extract')
+    page_id = kwargs.get('page_id', '')
+    try:
+        from extraction_benchmark.extractors.data_ml_models.pyg_runtime import extract_with_cascade  # noqa: WPS433
+        return extract_with_cascade(html, str(page_id)) or ""
+    except Exception as e:
+        logger.warning(f"[cascade] ошибка извлечения ({page_id}): {e}")
         return ""
 
 

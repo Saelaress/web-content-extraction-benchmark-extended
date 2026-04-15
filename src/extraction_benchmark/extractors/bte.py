@@ -86,7 +86,7 @@ def tokenise(html_text):
     Tokenises HTML document to a sequence of HTML tags and strings of
     non-whitespace characters (words).
     """
-    return [g1 for (g1, g2) in re.findall('(<([^>]|\s)+>|[^\s<]+)', html_text)]
+    return re.findall(r'(?:<[^>]+>|[^\s<]+)', html_text)
 
 
 def bte(tokens):
