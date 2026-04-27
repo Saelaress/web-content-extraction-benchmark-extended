@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Аннотация HTML-узлов атрибутом data-ml
-(признаки из одной страницы, без class/id) через bs4 + html5lib.
-Используется экстрактором PyG перед инференсом на «голом» HTML бенчмарка.
+Аннотация HTML-узлов атрибутом data-ml (признаки из одной страницы).
+Спецификация: data_ml_spec.md
 """
 
 from __future__ import annotations
@@ -13,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# bs4 + html5lib для парсинга HTML5
 try:
     from bs4 import BeautifulSoup
     from bs4.element import Tag
@@ -20,6 +20,7 @@ except ImportError:
     BeautifulSoup = None
     Tag = None
 
+# Детектор языка (Trafilatura: LanguageConfidence)
 try:
     from langdetect import detect_langs, LangDetectException
     _HAS_LANGDETECT = True
@@ -30,21 +31,27 @@ except ImportError:
 
 SCHEMA_VERSION = 1
 
+# Теги, считающиеся исключёнными (шум)
 EXCLUDED_TAGS = frozenset(
     {"script", "style", "noscript", "iframe", "svg", "path", "object", "embed"}
 )
 
+# Простой регэксп для email
 RE_EMAIL = re.compile(r"\S+@\S+\.\S+")
+
+# Пунктуация для r_punctuation и ends_with_punctuation
 PUNCTUATION_CHARS = set(".,!?;:\u2014\u2013-")
 
 
 def _tokenize_words(text: str) -> list[str]:
+    """Токенизация: по пробелам, пустые отброшены."""
     if not text or not text.strip():
         return []
     return [s for s in re.split(r"\s+", text.strip()) if s]
 
 
 def _sentence_count(text: str) -> int:
+    """Приблизительное число предложений: разбиение по [.!?], пустые отброшены."""
     if not text or not text.strip():
         return 0
     parts = re.split(r"[.!?]+", text.strip())
@@ -52,6 +59,7 @@ def _sentence_count(text: str) -> int:
 
 
 def _iter_tags(element: Any):
+    """Итерация по element-узлам (Tag), включая сам узел."""
     if isinstance(element, Tag):
         yield element
     for el in getattr(element, "descendants", []):
@@ -73,6 +81,7 @@ def _get_depth(element: Tag, root: Any) -> int:
 
 
 def _get_distance(from_el: Tag, to_el: Tag) -> int:
+    """Число шагов от from_el вверх по дереву до to_el (0 если from_el == to_el)."""
     d = 0
     cur = from_el
     while cur is not None and cur != to_el:
@@ -93,6 +102,7 @@ def _get_link_text_length(element: Tag) -> int:
 
 
 def _count_leaves(element: Tag) -> int:
+    """Число листьев поддерева: элементов без дочерних element-узлов."""
     count = 0
     for el in _iter_tags(element):
         has_element_child = any(True for _ in _child_tags(el))
@@ -143,6 +153,11 @@ def _list_internal_link_ratio(element: Tag) -> float:
 
 
 def _word_ratio_def31(element: Tag) -> float:
+    """
+    Definition 3.1: wordRatio(n) = sum over k in leaves(n), parent(k).tagName != "A":
+    words(k) / distance(k, n). leaves = элементы без дочерних элементов; не считаем листья,
+    чей родитель — тег <a> (текст внутри гиперссылки).
+    """
     total = 0.0
     for el in _iter_tags(element):
         parent = el.parent
@@ -161,6 +176,12 @@ def _word_ratio_def31(element: Tag) -> float:
 
 
 def _language_features(text: str) -> tuple[str, float]:
+    """
+    Язык и уверенность по тексту.
+    Возвращает (language_code ISO 639-1, confidence 0..1).
+    Для очень коротких текстов (< 10 символов) — ("", 0.0): детектор ненадёжен.
+    Для текстов 10–49 символов пробует определить язык, но уверенность будет ниже.
+    """
     if not _HAS_LANGDETECT or not text:
         return ("", 0.0)
     stripped = text.strip()
@@ -177,9 +198,10 @@ def _language_features(text: str) -> tuple[str, float]:
 
 
 def _compute_subtree_stats(element: Tag) -> dict[str, Any]:
+    """Собирает агрегаты по поддереву элемента (включая сам элемент)."""
     text = _get_subtree_text(element)
     words = _tokenize_words(text)
-    tag_count = sum(1 for _ in _iter_tags(element))
+    tag_count = sum(1 for _ in _iter_tags(element))  # все элементы в поддереве
     num_leaves = _count_leaves(element)
     link_count = len(element.find_all("a"))
     link_text_length = _get_link_text_length(element)
@@ -205,8 +227,11 @@ def _build_data_ml(
     max_depth: int,
     subtree: dict[str, Any],
 ) -> dict[str, Any]:
+    """Собирает объект для атрибута data-ml по элементу и предвычисленному поддереву."""
     depth = _get_depth(element, root)
     tag_name = _tag_name(element)
+    # class — список CSS-токенов (bs4 возвращает list); [] если атрибута нет
+    css_class: list[str] = list(element.get("class") or [])
     parent = element.parent if isinstance(element.parent, Tag) else None
     parent_tag = _tag_name(parent) if parent is not None else ""
     grandparent = parent.parent if (parent is not None and isinstance(parent.parent, Tag)) else None
@@ -221,6 +246,7 @@ def _build_data_ml(
     text = subtree["text"]
     sent_count = subtree["sentence_count"]
 
+    # Отношения
     link_text_ratio = round(lt / max(1, tl), 6)
     text_without_links_ratio = round((tl - lt) / max(1, tl), 6)
     words_per_tag = round(wc / max(1, tc), 6)
@@ -241,19 +267,16 @@ def _build_data_ml(
 
     has_visible_text = tl > 0
     is_whitespace_only = not text.strip() if text else True
-    has_only_links = (lc > 0 and tl > 0 and lt >= tl * 0.99)
+    has_only_links = (lc > 0 and tl > 0 and lt >= tl * 0.99)  # упрощённо
 
     depth_norm = round(depth / max(1, max_depth), 6)
 
+    # Definition 3.1 (Node properties)
     # hyperlink_ratio = количество ссылок / количество тегов в поддереве
     # (согласовано с links_per_descendant; узлы без ссылок дают 0.0)
     hyperlink_ratio_def31 = round(lc / max(1, tc), 6)
     children_ratio_binary = 0 if num_children <= 2 else 1
-    position_ratio = (
-        1.0
-        if depth <= max_depth / 2
-        else round(max_depth / max(1, depth) - 1.0, 6)
-    )
+    position_ratio = round(1.0 - depth / max(1, max_depth), 6) if max_depth > 0 else 1.0
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -261,6 +284,7 @@ def _build_data_ml(
             "dom_depth": depth,
             "dom_depth_norm": depth_norm,
             "tag_name": tag_name,
+            "css_class": css_class,
             "tag_is_a": tag_name == "a",
             "tag_is_div": tag_name == "div",
             "tag_is_p": tag_name == "p",
@@ -329,6 +353,10 @@ def _get_max_depth(root: Any) -> int:
 
 
 def annotate_html(html_input: str) -> str:
+    """
+    Принимает HTML-строку, возвращает HTML с проставленными атрибутами data-ml
+    на каждом element-узле.
+    """
     if not BeautifulSoup:
         raise RuntimeError(
             "Требуется bs4 + html5lib. Установите: pip install beautifulsoup4 html5lib"
@@ -336,6 +364,7 @@ def annotate_html(html_input: str) -> str:
 
     soup = BeautifulSoup(html_input, "html5lib")
     root = soup
+
     max_depth = _get_max_depth(root)
 
     for element in _iter_tags(root):
@@ -348,6 +377,7 @@ def annotate_html(html_input: str) -> str:
 
 
 def annotate_file(path: Path | str, encoding: str = "utf-8") -> str:
+    """Читает файл, аннотирует, возвращает HTML-строку."""
     path = Path(path)
     raw = path.read_bytes()
     try:
@@ -359,17 +389,14 @@ def annotate_file(path: Path | str, encoding: str = "utf-8") -> str:
 
 def main() -> None:
     if len(sys.argv) < 2:
-        print(
-            "Usage: python -m extraction_benchmark.extractors.data_ml_models.annotate_dom <in.html> [out.html]",
-            file=sys.stderr,
-        )
+        print("Использование: python annotate_dom.py <input.html> [output.html]", file=sys.stderr)
         sys.exit(1)
     inp = Path(sys.argv[1])
     out = Path(sys.argv[2]) if len(sys.argv) > 2 else None
     result = annotate_file(inp)
     if out:
         out.write_text(result, encoding="utf-8")
-        print(f"Written: {out}")
+        print(f"Записано: {out}")
     else:
         print(result)
 

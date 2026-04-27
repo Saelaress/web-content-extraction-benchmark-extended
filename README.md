@@ -10,7 +10,7 @@ This repository extends the original benchmark with the following enhancements:
 
 - **New evaluation metric**: Added BLEU score evaluation alongside ROUGE and Levenshtein metrics
 - **New extraction model**: Integrated Crawl4AI for web content extraction
-- **PyG extractor**: Graph neural network (PyTorch Geometric) over the annotated DOM, with FastText node features
+- **SAGE extractor**: Graph neural network (GraphSAGE) over the annotated DOM, with FastText node features
 - **Extended datasets**: Added Canola and Newspaper3k datasets to the benchmark
 
 The original paper is a reproducibility study of state-of-the-art web page main content extraction tools. This repository provides both the raw data from the paper and the tools used for creating them. Following are usage instructions for combining existing annotated datasets to a common format and for running and evaluating the content extraction systems on this combined dataset.
@@ -76,17 +76,20 @@ wceb extract -m readability -m resiliparse -d scrapinghub
 This will run only Readability and Resiliparse on the Scrapinghub dataset. Enter `wceb extract --help` for more information.
 
 
-**NOTE:** If you have a CUDA-capable GPU but limited graphics memory, you may want to run neural models with ``--parallelism=1``. This concerns the `boilernet`, `web2text`, and `pyg` extractors (see below).
+**NOTE:** If you have a CUDA-capable GPU but limited graphics memory, you may want to run neural models with ``--parallelism=1``. This concerns the `boilernet`, `web2text`, and `sage` extractors (see below).
 
 
-### Run PyG
+### Run SAGE / Bidirectional
 
-The `pyg` extractor runs a small GraphSAGE-style model on the DOM (after `data-ml` annotation attributes are injected). Node features combine numeric DOM signals, FastText embeddings of visible text, HTML tag names, and CSS class tokens.
+The `sage` extractor runs a GraphSAGE model on the DOM (after `data-ml` annotation attributes are injected). Node features combine numeric DOM signals, FastText embeddings of visible text, HTML tag names, and CSS class tokens.
 
-**Required files** in `third-party/pyg-models/`:
+The `bidirectional` extractor runs the same encoder but with a bidirectional GNN (bottom-up and top-down passes per layer, experiment 2).
 
-- `pyg_gnn.pt` — GNN checkpoint (small)
-- `pyg_preprocessors.pt` — scalers, label encoders, metadata (small)
+**Required files** in `third-party/sage-models/`:
+
+- `sage_gnn.pt` — SAGE GNN checkpoint (small)
+- `sage_preprocessors.pt` — scalers, label encoders, metadata (small)
+- `bidirectional_gnn.pt` — Bidirectional GNN checkpoint (small)
 
 **Not shipped in this repository** (large; ignored by `.gitignore`):
 
@@ -95,15 +98,16 @@ The `pyg` extractor runs a small GraphSAGE-style model on the DOM (after `data-m
 Download the file yourself, for example from the [FastText pretrained vectors page](https://fasttext.cc/docs/en/pretrained-vectors.html) (section *English*, choose the **bin** `cc.en.300.bin`). The file is on the order of **several gigabytes**; place it exactly here:
 
 ```text
-third-party/pyg-models/cc.en.300.bin
+third-party/sage-models/cc.en.300.bin
 ```
 
-Alternatively, set the environment variable `FASTTEXT_MODEL_PATH` to the absolute path of your `.bin` file. If the file is missing, extraction fails with a clear `FileNotFoundError`.
+Alternatively, set the environment variable `FASTTEXT_MODEL_PATH` to the absolute path of your `.bin` file. If the file is missing, extraction fails with a clear `FileNotFoundError`. You can also override the models directory with `WCEB_SAGE_MODELS_DIR`.
 
-Run the extractor like any other model:
+Run the extractors like any other model:
 
 ```console
-wceb extract -m pyg -d canola
+wceb extract -m sage -d canola
+wceb extract -m bidirectional -d canola
 ```
 
 Use `-p 1` (or lower parallelism) if GPU memory is tight.
@@ -130,17 +134,11 @@ pip install numpy==1.18.0 tensorflow==1.15.0 tensorflow-gpu==1.15.0 protobuf==3.
 deactivate
 ```
 
-You also need **Scala**, **Java 8** (for the JVM that runs the Web2Text JAR), and the fat JAR at **`third-party/web2text.jar`** (included in this fork). If Java 8 is not at `/usr/lib/jvm/java-8-openjdk-amd64`, set **`WCEB_JAVA_HOME`** or **`JAVA_HOME`** to your JDK 8 path before running extraction.
-
 Back from the repository root, you can now run Web2Text:
 
 ```console
 wceb extract -m web2text -p 1
 ```
-
-### Run Boilernet
-
-Boilernet also uses TensorFlow 1.15 and therefore executes inside a dedicated Python 3.7 venv located at `third-party/boilernet-tf1/venv`. The helper script `third-party/boilernet-tf1/run_boilernet.py` boots that venv, loads the TF1 model, and prints the extracted text; it is invoked automatically by `wceb extract -m boilernet`.
 
 ## Evaluate extraction results
 
@@ -202,7 +200,7 @@ This fork includes the following modifications and additions:
 
 - **BLEU metric**: Added BLEU score evaluation for assessing extraction quality
 - **Crawl4AI integration**: Added Crawl4AI as a new extraction model using WebScrapingStrategy and DefaultMarkdownGenerator
-- **PyG extractor**: DOM-level GNN extractor; FastText `cc.en.300.bin` must be downloaded separately (see *Run PyG*)
+- **SAGE / Bidirectional extractors**: DOM-level GNN extractors; FastText `cc.en.300.bin` must be downloaded separately (see *Run SAGE / Bidirectional*)
 - **Extended datasets**: Added Canola and Newspaper3k datasets to expand the benchmark coverage
 
 ## Cite

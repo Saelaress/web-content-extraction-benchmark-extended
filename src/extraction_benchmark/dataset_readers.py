@@ -178,75 +178,6 @@ class CleanPortalEvalReader(CleanEvalReader):
     def dataset_size(self) -> Optional[int]:
         return len(glob.glob(os.path.join(DATASET_RAW_PATH, self.dataset_name, 'ConvertedGoldStandard', '*.txt')))
     
-class Newspaper3kReader(DatasetReader):
-    def __init__(self, ground_truth):
-        super().__init__(ground_truth)
-        self.dataset_name = 'newspaper3k'
-        self.dataset_path = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'html')
-        self.dataset_path_truth = os.path.join(DATASET_RAW_PATH, self.dataset_name, 'text')
-
-    def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
-        read_path = self.dataset_path_truth if self.is_truth else self.dataset_path
-        
-        # Создаем маппинг между HTML и текстовыми файлами
-        html_files = set(os.path.splitext(f)[0] for f in os.listdir(self.dataset_path) if f.endswith('.html'))
-        text_files = set(os.path.splitext(f)[0] for f in os.listdir(self.dataset_path_truth) if f.endswith('.txt'))
-        
-        # Специальные маппинги для файлов с разными именами
-        name_mapping = {
-            'arabic': 'arabic_article',
-            'chinese': 'chinese_article', 
-            'japanese': 'japanese_article',
-            'japanese2': 'japanese_article2',
-            'cnn': 'cnn_article',
-            'cnn_summary': 'cnn_main_site'
-        }
-        
-        for file in os.listdir(read_path):
-            if not file.endswith('.txt' if self.is_truth else '.html'):
-                continue
-                
-            abs_path = os.path.join(read_path, file)
-            content = self._read_file(abs_path)
-            source = os.path.splitext(file)[0]
-            
-            if self.is_truth:
-                # Для текстовых файлов ищем соответствующий HTML
-                html_name = name_mapping.get(source, source)
-                html_file = os.path.join(self.dataset_path, html_name + '.html')
-                
-                # Проверяем существование HTML файла
-                if not os.path.exists(html_file):
-                    continue
-                    
-                hash_file = html_file
-            else:
-                # Для HTML файлов проверяем наличие соответствующего текста
-                text_name = None
-                for txt_name, html_name in name_mapping.items():
-                    if html_name == source:
-                        text_name = txt_name
-                        break
-                if text_name is None:
-                    text_name = source
-                    
-                text_file = os.path.join(self.dataset_path_truth, text_name + '.txt')
-                if not os.path.exists(text_file):
-                    continue
-                    
-                hash_file = abs_path
-            
-            yield self._file_hash(hash_file), self._build_dict(
-                self.dataset_name, 
-                source, 
-                content,
-                url=None
-            )
-
-    def dataset_size(self) -> Optional[int]:
-        return len(glob.glob(os.path.join(DATASET_RAW_PATH, self.dataset_name, 'text', '*.txt')))
-
-
 class DragnetReader(DatasetReader):
     def read(self) -> Iterable[Tuple[str, Dict[str, Any]]]:
         dataset_path = os.path.join(DATASET_RAW_PATH, 'dragnet', 'HTML')
@@ -491,8 +422,6 @@ def read_raw_dataset(dataset, ground_truth):
             return CleanEvalReader(ground_truth)
         case 'cleanportaleval':
             return CleanPortalEvalReader(ground_truth)
-        case 'newspaper3k':
-            return Newspaper3kReader(ground_truth)
         case 'dragnet':
             return DragnetReader(ground_truth)
         case 'google-trends-2017':
